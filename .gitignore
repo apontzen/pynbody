@@ -8,3 +8,9 @@ testdata*
 docs/_static/*png
 docs/*png
 .DS_Store
+
+# Cython build artifacts
+*.c
+*.cpp
+*.so
+*.egg-info/
