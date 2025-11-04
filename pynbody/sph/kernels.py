@@ -21,6 +21,11 @@ class KernelBase:
         # The maximum value of the displacement over the smoothing for
         # which the kernel is non-zero
 
+        self.uses_cartesian = False
+        # If True, the kernel depends on (x,y,z) coordinates rather than just
+        # radial distance. The rendering code will call get_value_xyz instead
+        # of using the precomputed samples.
+
     def _get_samples_from_cache(self):
         if hash(self) in KernelBase._sample_cache:
             return KernelBase._sample_cache[hash(self)]
@@ -42,6 +47,28 @@ class KernelBase:
     def get_value(self, d, h=1) -> float:
         """Get the value of the kernel for a given smoothing length."""
         raise NotImplementedError("Subclasses must implement this method")
+
+    def get_value_xyz(self, x, y, z, h=1) -> float:
+        """Get the value of the kernel given Cartesian coordinates.
+
+        This is used for kernels that depend on the actual (x,y,z) position
+        rather than just radial distance. By default, this falls back to
+        computing the radial distance and calling get_value.
+
+        Parameters
+        ----------
+        x, y, z : float
+            Coordinates relative to the particle center
+        h : float
+            Smoothing length
+
+        Returns
+        -------
+        float
+            Kernel value at (x,y,z)
+        """
+        d = np.sqrt(x**2 + y**2 + z**2)
+        return self.get_value(d, h)
 
     def projection(self) -> KernelBase:
         """Return a 2D projection of this kernel"""
@@ -88,6 +115,138 @@ class WendlandC2Kernel(KernelBase):
     @classmethod
     def get_c_kernel_id(cls):
         return 1
+
+
+class CubeKernel(KernelBase):
+    """A cube/top-hat kernel appropriate for AMR simulations.
+
+    This kernel represents a cubic cell with side length 2h, properly handling
+    the Cartesian geometry of AMR cells. Unlike SPH kernels which are spherically
+    symmetric, this kernel returns a constant value inside the cube defined by
+    |x| < h, |y| < h, |z| < h, and zero outside.
+
+    This is more appropriate than SPH kernels for AMR data (e.g., RAMSES simulations)
+    where the data is naturally organized in cubic cells rather than smooth particles.
+
+    Note: This kernel uses Cartesian coordinates (x,y,z) rather than just radial
+    distance, so it evaluates directly rather than using precomputed lookup tables.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.h_power = 3
+        # For a cube, max_d is the distance to the corner: sqrt(3)*h
+        self.max_d = np.sqrt(3.0)  # ≈ 1.732
+        self.uses_cartesian = True
+
+    def get_value(self, d, h=1):
+        """Get the value of the 3D cube kernel based on radial distance.
+
+        Note: This method provides a spherical approximation for compatibility,
+        but is not the preferred evaluation method. Use get_value_xyz for
+        accurate cubic geometry.
+        """
+        # Approximate cube with inscribed sphere for compatibility
+        if d < h:
+            return 1.0 / (8.0 * h ** 3)
+        else:
+            return 0.0
+
+    def get_value_xyz(self, x, y, z, h=1) -> float:
+        """Get the value of the 3D cube kernel using Cartesian coordinates.
+
+        The cube extends from -h to +h in each direction, with uniform density.
+
+        Parameters
+        ----------
+        x, y, z : float
+            Coordinates relative to the cell center
+        h : float
+            Half the cell side length
+
+        Returns
+        -------
+        float
+            1/(8h³) if inside the cube, 0 otherwise
+        """
+        if abs(x) < h and abs(y) < h and abs(z) < h:
+            # Uniform density: 1 / volume, where volume = (2h)³ = 8h³
+            return 1.0 / (8.0 * h ** 3)
+        else:
+            return 0.0
+
+    def projection(self) -> KernelBase:
+        """Return a 2D projection of the cube kernel."""
+        return CubeKernelProjection()
+
+    @classmethod
+    def get_c_kernel_id(cls):
+        return 2
+
+
+class CubeKernelProjection(KernelBase):
+    """2D projection of a cube kernel.
+
+    Represents the projection of a cubic cell along the z-axis. The result is a square
+    footprint in the xy-plane with side length 2h. The kernel returns a constant value
+    inside the square defined by |x| < h and |y| < h, and zero outside.
+
+    Note: This kernel uses Cartesian coordinates (x,y) rather than just radial
+    distance, so it evaluates directly rather than using precomputed lookup tables.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.h_power = 2
+        # For a square, max_d is the distance to the corner: sqrt(2)*h
+        self.max_d = np.sqrt(2.0)  # ≈ 1.414
+        self.uses_cartesian = True
+
+    def get_value(self, d, h=1):
+        """Get the value of the 2D projected cube kernel based on radial distance.
+
+        Note: This method provides a circular approximation for compatibility,
+        but is not the preferred evaluation method. Use get_value_xyz for
+        accurate square geometry.
+        """
+        # Approximate square with inscribed circle for compatibility
+        if d < h:
+            return 1.0 / (4.0 * h ** 2)
+        else:
+            return 0.0
+
+    def get_value_xyz(self, x, y, z, h=1) -> float:
+        """Get the value of the 2D projected cube kernel using Cartesian coordinates.
+
+        The square extends from -h to +h in x and y directions. The z coordinate
+        is ignored for 2D projections.
+
+        Parameters
+        ----------
+        x, y : float
+            Coordinates in the image plane relative to the cell center
+        z : float
+            Ignored for 2D projections
+        h : float
+            Half the cell side length
+
+        Returns
+        -------
+        float
+            1/(4h²) if inside the square, 0 otherwise
+        """
+        if abs(x) < h and abs(y) < h:
+            # Uniform surface density: 1 / area, where area = (2h)² = 4h²
+            return 1.0 / (4.0 * h ** 2)
+        else:
+            return 0.0
+
+    def projection(self):
+        raise ValueError("Cannot project a 2D kernel")
+
+    @classmethod
+    def get_c_kernel_id(cls):
+        return 2
 
 
 class Kernel2D(KernelBase):

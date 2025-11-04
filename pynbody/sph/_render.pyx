@@ -139,6 +139,33 @@ cdef image_output_type get_kernel_xyz(fixed_input_type x, fixed_input_type y, fi
      return get_kernel(x*x+y*y+z*z,kernel_max_2,h_to_the_kdim,num_samples,kvals)
 
 
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.cdivision(True)
+cdef image_output_type get_kernel_cube(fixed_input_type x, fixed_input_type y, fixed_input_type z,
+                                       fixed_input_type h, int kdim) nogil :
+    """Evaluate cube kernel at (x,y,z) relative to particle center with smoothing h.
+
+    For 2D (kdim=2): returns 1/(4h²) if |x|<h and |y|<h, else 0
+    For 3D (kdim=3): returns 1/(8h³) if |x|<h and |y|<h and |z|<h, else 0
+    """
+    cdef fixed_input_type abs_x = cmath.fabs(x)
+    cdef fixed_input_type abs_y = cmath.fabs(y)
+    cdef fixed_input_type abs_z = cmath.fabs(z)
+
+    if kdim == 2:
+        # 2D projection: check if inside square
+        if abs_x < h and abs_y < h:
+            return 1.0 / (4.0 * h * h)
+        else:
+            return 0.0
+    else:
+        # 3D: check if inside cube
+        if abs_x < h and abs_y < h and abs_z < h:
+            return 1.0 / (8.0 * h * h * h)
+        else:
+            return 0.0
+
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
@@ -183,10 +210,24 @@ def render_image(int nx, int ny,
     cdef int kernel_dim = kernel.h_power
     cdef fixed_input_type max_d_over_h = kernel.max_d
 
+    # Check if this is a cartesian kernel (e.g., cube kernel for AMR)
+    cdef int uses_cartesian = int(getattr(kernel, 'uses_cartesian', False))
 
-    cdef np.ndarray[image_output_type,ndim=1] samples = kernel.get_samples(dtype=np_image_output_type)
-    cdef int num_samples = len(samples)
-    cdef image_output_type* samples_c = <image_output_type*>samples.data
+    cdef np.ndarray[image_output_type,ndim=1] samples
+    cdef int num_samples
+    cdef image_output_type* samples_c
+
+    # For cartesian kernels, skip sample generation since we evaluate directly
+    if not uses_cartesian:
+        samples = kernel.get_samples(dtype=np_image_output_type)
+        num_samples = len(samples)
+        samples_c = <image_output_type*>samples.data
+    else:
+        # Dummy values for cartesian kernels
+        samples = np.zeros(1, dtype=np_image_output_type)
+        num_samples = 1
+        samples_c = <image_output_type*>samples.data
+
     cdef image_output_type sm_to_kdim   # minimize casting when same type as output
 
     cdef fixed_input_type kernel_max_2 # minimize casting when same type as input
@@ -267,7 +308,10 @@ def render_image(int nx, int ny,
 
                         # final bounds check
                         if x_pos>=0 and x_pos<nx and y_pos>=0 and y_pos<ny :
-                            result[y_pos,x_pos]+=qty_i*get_kernel_xyz(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel)*use_z, kernel_max_2 ,sm_to_kdim,num_samples,samples_c)
+                            if uses_cartesian:
+                                result[y_pos,x_pos]+=qty_i*get_kernel_cube(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel)*use_z, sm_i, kernel_dim)
+                            else:
+                                result[y_pos,x_pos]+=qty_i*get_kernel_xyz(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel)*use_z, kernel_max_2 ,sm_to_kdim,num_samples,samples_c)
                     else :
                         # multi-pixel
                         x_pix_start = int((x_i-max_d_over_h*sm_i-x1)/pixel_dx)
@@ -297,7 +341,10 @@ def render_image(int nx, int ny,
 
                                 #c_result[x_pos+nx*y_pos]+=qty_i*get_kernel_xyz(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel)*use_z, kernel_max_2 ,sm_to_kdim,num_samples,samples_c)
 
-                                result[y_pos,x_pos]+=qty_i*get_kernel_xyz(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel)*use_z, kernel_max_2 ,sm_to_kdim,num_samples,samples_c)
+                                if uses_cartesian:
+                                    result[y_pos,x_pos]+=qty_i*get_kernel_cube(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel)*use_z, sm_i, kernel_dim)
+                                else:
+                                    result[y_pos,x_pos]+=qty_i*get_kernel_xyz(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel)*use_z, kernel_max_2 ,sm_to_kdim,num_samples,samples_c)
 
     return result
 
@@ -339,9 +386,24 @@ def to_3d_grid(int nx, int ny, int nz,
     cdef int kernel_dim = kernel.h_power
     cdef fixed_input_type max_d_over_h = kernel.max_d
 
-    cdef np.ndarray[image_output_type,ndim=1] samples = kernel.get_samples(dtype=np_image_output_type)
-    cdef int num_samples = len(samples)
-    cdef image_output_type* samples_c = <image_output_type*>samples.data
+    # Check if this is a cartesian kernel (e.g., cube kernel for AMR)
+    cdef int uses_cartesian = int(getattr(kernel, 'uses_cartesian', False))
+
+    cdef np.ndarray[image_output_type,ndim=1] samples
+    cdef int num_samples
+    cdef image_output_type* samples_c
+
+    # For cartesian kernels, skip sample generation since we evaluate directly
+    if not uses_cartesian:
+        samples = kernel.get_samples(dtype=np_image_output_type)
+        num_samples = len(samples)
+        samples_c = <image_output_type*>samples.data
+    else:
+        # Dummy values for cartesian kernels
+        samples = np.zeros(1, dtype=np_image_output_type)
+        num_samples = 1
+        samples_c = <image_output_type*>samples.data
+
     cdef image_output_type sm_to_kdim   # minimize casting when same type as output
 
     cdef fixed_input_type kernel_max_2 # minimize casting when same type as input
@@ -407,7 +469,10 @@ def to_3d_grid(int nx, int ny, int nz,
                             # final bounds check
                             if x_pos>=0 and x_pos<nx and y_pos>=0 and y_pos<ny \
                                and z_pos>=0 and z_pos<nz :
-                                result[x_pos,y_pos,z_pos]+=qty_i*get_kernel_xyz(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel)*use_z, kernel_max_2 ,sm_to_kdim,num_samples,samples_c)
+                                if uses_cartesian:
+                                    result[x_pos,y_pos,z_pos]+=qty_i*get_kernel_cube(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel)*use_z, sm_i, kernel_dim)
+                                else:
+                                    result[x_pos,y_pos,z_pos]+=qty_i*get_kernel_xyz(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel)*use_z, kernel_max_2 ,sm_to_kdim,num_samples,samples_c)
                         else :
                             # multi-pixel
                             x_pix_start = int((x_i-max_d_over_h*sm_i-x1)/pixel_dx)
@@ -429,6 +494,9 @@ def to_3d_grid(int nx, int ny, int nz,
 
                                     for z_pos in range(z_pix_start,z_pix_stop) :
                                         z_pixel = pixel_dz*<fixed_input_type>(z_pos)+z_start
-                                        result[x_pos,y_pos,z_pos]+=qty_i*get_kernel_xyz(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel), kernel_max_2 ,sm_to_kdim,num_samples,samples_c)
+                                        if uses_cartesian:
+                                            result[x_pos,y_pos,z_pos]+=qty_i*get_kernel_cube(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel), sm_i, kernel_dim)
+                                        else:
+                                            result[x_pos,y_pos,z_pos]+=qty_i*get_kernel_xyz(x_i-x_pixel, y_i-y_pixel, (z_i-z_pixel), kernel_max_2 ,sm_to_kdim,num_samples,samples_c)
 
     return result

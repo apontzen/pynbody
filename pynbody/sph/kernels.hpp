@@ -11,6 +11,9 @@ namespace kernels
   class WendlandC2Kernel;
 
   template <typename T>
+  class CubeKernel;
+
+  template <typename T>
   class Kernel
   {
   public:
@@ -27,6 +30,8 @@ namespace kernels
         return std::make_shared<CubicSplineKernel<T>>();
       case 1:
         return std::make_shared<WendlandC2Kernel<T>>(n_smooth);
+      case 2:
+        return std::make_shared<CubeKernel<T>>();
       default:
         throw std::runtime_error("Unknown kernel id");
       }
@@ -112,6 +117,33 @@ namespace kernels
         rs = 0.0;
 
       return rs;
+    }
+  };
+
+  template <typename T>
+  class CubeKernel : public Kernel<T>
+  {
+  private:
+    static constexpr T kernel_constant = 0.125; // 1/8 for uniform cube density
+  public:
+    CubeKernel() {}
+    virtual ~CubeKernel() {}
+    virtual T operator()(T r_over_h_squared) const override
+    {
+      // Cube kernel approximation using inscribed sphere (r < h)
+      // Note: This is a fallback for compatibility. The Cython rendering code
+      // (get_kernel_cube) provides the proper Cartesian evaluation.
+      // For a cube of side 2h, the inscribed sphere has radius h.
+      if NPY_UNLIKELY(r_over_h_squared > 1.0)  // r/h > 1
+        return 0.0;
+      else
+        return kernel_constant;
+    }
+    virtual T gradient(T r_over_h_squared, T r_squared) const override
+    {
+      // Top-hat kernel has zero gradient everywhere (except at the boundary,
+      // but we can safely return 0 there too)
+      return 0.0;
     }
   };
 }
