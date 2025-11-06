@@ -130,6 +130,10 @@ class CubeKernel(KernelBase):
 
     Note: This kernel uses Cartesian coordinates (x,y,z) rather than just radial
     distance, so it evaluates directly rather than using precomputed lookup tables.
+
+    If the simulation has been rotated, the kernel automatically handles the
+    rotation by evaluating in the simulation's original (unrotated) frame where
+    the AMR cells are axis-aligned.
     """
 
     def __init__(self):
@@ -138,6 +142,18 @@ class CubeKernel(KernelBase):
         # For a cube, max_d is the distance to the corner: sqrt(3)*h
         self.max_d = np.sqrt(3.0)  # ≈ 1.732
         self.uses_cartesian = True
+        self.rotation_matrix = None  # Will be set by renderer if simulation is rotated
+
+    def set_rotation_matrix(self, matrix):
+        """Set the rotation matrix for evaluating the kernel in rotated coordinates.
+
+        Parameters
+        ----------
+        matrix : np.ndarray
+            3x3 rotation matrix representing the transformation from current
+            coordinates to the simulation's original frame
+        """
+        self.rotation_matrix = np.asarray(matrix) if matrix is not None else None
 
     def get_value(self, d, h=1):
         """Get the value of the 3D cube kernel based on radial distance.
@@ -156,11 +172,13 @@ class CubeKernel(KernelBase):
         """Get the value of the 3D cube kernel using Cartesian coordinates.
 
         The cube extends from -h to +h in each direction, with uniform density.
+        If a rotation matrix has been set (simulation is rotated), the coordinates
+        are transformed back to the original frame before evaluation.
 
         Parameters
         ----------
         x, y, z : float
-            Coordinates relative to the cell center
+            Coordinates relative to the cell center (in current frame)
         h : float
             Half the cell side length
 
@@ -169,7 +187,16 @@ class CubeKernel(KernelBase):
         float
             1/(8h³) if inside the cube, 0 otherwise
         """
-        if abs(x) < h and abs(y) < h and abs(z) < h:
+        # If simulation is rotated, transform coordinates back to original frame
+        if self.rotation_matrix is not None:
+            # Apply inverse rotation (transpose of rotation matrix)
+            coords = np.array([x, y, z])
+            x_orig, y_orig, z_orig = np.dot(self.rotation_matrix.T, coords)
+        else:
+            x_orig, y_orig, z_orig = x, y, z
+
+        # Evaluate in original frame where cells are axis-aligned
+        if abs(x_orig) < h and abs(y_orig) < h and abs(z_orig) < h:
             # Uniform density: 1 / volume, where volume = (2h)³ = 8h³
             return 1.0 / (8.0 * h ** 3)
         else:
@@ -177,7 +204,11 @@ class CubeKernel(KernelBase):
 
     def projection(self) -> KernelBase:
         """Return a 2D projection of the cube kernel."""
-        return CubeKernelProjection()
+        proj = CubeKernelProjection()
+        # Pass rotation matrix to projection
+        if self.rotation_matrix is not None:
+            proj.set_rotation_matrix(self.rotation_matrix)
+        return proj
 
     @classmethod
     def get_c_kernel_id(cls):
@@ -193,6 +224,10 @@ class CubeKernelProjection(KernelBase):
 
     Note: This kernel uses Cartesian coordinates (x,y) rather than just radial
     distance, so it evaluates directly rather than using precomputed lookup tables.
+
+    If the simulation has been rotated, the kernel automatically handles the
+    rotation by evaluating in the simulation's original (unrotated) frame where
+    the AMR cells are axis-aligned.
     """
 
     def __init__(self):
@@ -201,6 +236,18 @@ class CubeKernelProjection(KernelBase):
         # For a square, max_d is the distance to the corner: sqrt(2)*h
         self.max_d = np.sqrt(2.0)  # ≈ 1.414
         self.uses_cartesian = True
+        self.rotation_matrix = None  # Will be set by renderer if simulation is rotated
+
+    def set_rotation_matrix(self, matrix):
+        """Set the rotation matrix for evaluating the kernel in rotated coordinates.
+
+        Parameters
+        ----------
+        matrix : np.ndarray
+            3x3 rotation matrix representing the transformation from current
+            coordinates to the simulation's original frame
+        """
+        self.rotation_matrix = np.asarray(matrix) if matrix is not None else None
 
     def get_value(self, d, h=1):
         """Get the value of the 2D projected cube kernel based on radial distance.
@@ -219,12 +266,13 @@ class CubeKernelProjection(KernelBase):
         """Get the value of the 2D projected cube kernel using Cartesian coordinates.
 
         The square extends from -h to +h in x and y directions. The z coordinate
-        is ignored for 2D projections.
+        is ignored for 2D projections. If a rotation matrix has been set, the
+        coordinates are transformed back to the original frame before evaluation.
 
         Parameters
         ----------
         x, y : float
-            Coordinates in the image plane relative to the cell center
+            Coordinates in the image plane relative to the cell center (in current frame)
         z : float
             Ignored for 2D projections
         h : float
@@ -235,7 +283,17 @@ class CubeKernelProjection(KernelBase):
         float
             1/(4h²) if inside the square, 0 otherwise
         """
-        if abs(x) < h and abs(y) < h:
+        # If simulation is rotated, transform coordinates back to original frame
+        if self.rotation_matrix is not None:
+            # Apply inverse rotation (transpose of rotation matrix)
+            # For 2D projection, we only care about the xy plane in the original frame
+            coords = np.array([x, y, z])
+            x_orig, y_orig, z_orig = np.dot(self.rotation_matrix.T, coords)
+        else:
+            x_orig, y_orig = x, y
+
+        # Evaluate in original frame where cells are axis-aligned
+        if abs(x_orig) < h and abs(y_orig) < h:
             # Uniform surface density: 1 / area, where area = (2h)² = 4h²
             return 1.0 / (4.0 * h ** 2)
         else:

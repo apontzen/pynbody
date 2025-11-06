@@ -318,5 +318,156 @@ class TestCubeKernelNormalization:
         npt.assert_allclose(integral, 1.0, rtol=0.1)
 
 
+class TestCubeKernelWithRotations:
+    """Tests for cube kernel with rotated simulations."""
+
+    def test_cube_kernel_with_rotation_matrix(self):
+        """Test that cube kernel correctly handles rotation matrices."""
+        kernel = kernels.CubeKernel()
+        h = 1.0
+
+        # Create a 45-degree rotation around z-axis
+        angle = np.pi / 4
+        rotation_matrix = np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle),  np.cos(angle), 0],
+            [0,              0,             1]
+        ])
+
+        kernel.set_rotation_matrix(rotation_matrix)
+
+        # A point that's inside in rotated coords but would be outside without rotation
+        # After rotating by 45°, (0.9, 0, 0) in rotated frame maps to (0.636, 0.636, 0) in original
+        x_rot, y_rot, z_rot = 0.9, 0.0, 0.0
+
+        # Apply the rotation to see where it maps in original frame
+        coords_original = np.dot(rotation_matrix.T, [x_rot, y_rot, z_rot])
+
+        # Both coordinates in original frame are < h, so it should be inside
+        val = kernel.get_value_xyz(x_rot, y_rot, z_rot, h)
+        assert val > 0, "Point should be inside when rotation is considered"
+
+        # A point that's clearly outside even with rotation
+        val_outside = kernel.get_value_xyz(2.0, 0.0, 0.0, h)
+        assert val_outside == 0, "Point clearly outside should remain outside"
+
+    def test_cube_kernel_rotation_alignment(self):
+        """Test that cube kernel aligns with original AMR cell orientation."""
+        kernel = kernels.CubeKernel()
+        h = 1.0
+
+        # 90-degree rotation around z-axis (swaps x and y)
+        rotation_matrix = np.array([
+            [0, -1, 0],
+            [1,  0, 0],
+            [0,  0, 1]
+        ])
+
+        kernel.set_rotation_matrix(rotation_matrix)
+
+        # After 90° rotation, (0, 0.5, 0) in rotated frame maps to (0.5, 0, 0) in original
+        # Both should be inside
+        val1 = kernel.get_value_xyz(0.0, 0.5, 0.0, h)
+        assert val1 > 0
+
+        # After rotation, (1.5, 0, 0) in rotated frame maps to (0, 1.5, 0) in original
+        # Both should be outside
+        val2 = kernel.get_value_xyz(1.5, 0.0, 0.0, h)
+        assert val2 == 0
+
+    def test_2d_projection_with_rotation(self):
+        """Test that 2D projection handles rotations correctly."""
+        kernel_3d = kernels.CubeKernel()
+
+        # Create a rotation matrix
+        angle = np.pi / 6  # 30 degrees
+        rotation_matrix = np.array([
+            [np.cos(angle), -np.sin(angle), 0],
+            [np.sin(angle),  np.cos(angle), 0],
+            [0,              0,             1]
+        ])
+
+        kernel_3d.set_rotation_matrix(rotation_matrix)
+        kernel_2d = kernel_3d.projection()
+
+        # Check that rotation matrix was passed to projection
+        assert kernel_2d.rotation_matrix is not None
+        npt.assert_array_almost_equal(kernel_2d.rotation_matrix, rotation_matrix)
+
+        # Test evaluation with rotation
+        h = 1.0
+        val = kernel_2d.get_value_xyz(0.5, 0.5, 0.0, h)
+        assert val > 0
+
+    @pytest.fixture
+    def amr_snapshot_for_rotation(self):
+        """Create a simple AMR-like snapshot for rotation testing."""
+        n_cells = 100
+        np.random.seed(123)
+
+        f = pynbody.new(n_cells)
+
+        # Create cells in a line along x-axis
+        f['pos'] = np.zeros((n_cells, 3))
+        f['pos'][:, 0] = np.linspace(-0.5, 0.5, n_cells)
+        f['pos'].units = 'kpc'
+
+        f['mass'] = np.ones(n_cells) / n_cells
+        f['mass'].units = 'Msol'
+
+        f['smooth'] = np.ones(n_cells) * 0.02
+        f['smooth'].units = 'kpc'
+
+        f['rho'] = f['mass'] / (f['smooth']**3)
+
+        return f
+
+    def test_render_with_rotated_simulation(self, amr_snapshot_for_rotation):
+        """Test rendering with a rotated simulation."""
+        f = amr_snapshot_for_rotation
+
+        # Render without rotation
+        im_no_rotation = pynbody.sph.render_image(f, nx=50, ny=50, width=1.0,
+                                                   kernel='cube',
+                                                   approximate_fast=False)
+
+        # Rotate simulation 90 degrees around z-axis
+        with f.rotate_z(90):
+            # Render with rotation
+            im_with_rotation = pynbody.sph.render_image(f, nx=50, ny=50, width=1.0,
+                                                        kernel='cube',
+                                                        approximate_fast=False)
+
+            # Images should be different (rotated by 90°)
+            # The pattern along x in original should now be along y
+            assert not np.allclose(im_no_rotation, im_with_rotation, rtol=0.1)
+
+            # But total mass should be conserved
+            npt.assert_allclose(im_no_rotation.sum(), im_with_rotation.sum(), rtol=0.1)
+
+            # Check that the rotation actually rotated the image
+            # Profile along x-axis in original image
+            profile_x_original = im_no_rotation[25, :]
+            # Profile along y-axis in rotated image (should match)
+            profile_y_rotated = im_with_rotation[:, 25]
+
+            # These should be similar (allowing for some numerical differences)
+            npt.assert_allclose(profile_x_original, profile_y_rotated, rtol=0.3)
+
+    def test_multiple_rotations(self, amr_snapshot_for_rotation):
+        """Test that multiple chained rotations are handled correctly."""
+        f = amr_snapshot_for_rotation
+
+        # Apply multiple rotations
+        with f.rotate_z(45).rotate_y(30):
+            im = pynbody.sph.render_image(f, nx=50, ny=50, width=1.0,
+                                         kernel='cube',
+                                         approximate_fast=False)
+
+            # Should produce valid image
+            assert np.isfinite(im).all()
+            assert im.sum() > 0
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

@@ -217,6 +217,35 @@ class ImageRendererBase:
         """
         self._particle_array_slice = slice
 
+    def _extract_cumulative_rotation_matrix(self):
+        """Extract the cumulative rotation matrix from the transformation stack.
+
+        Returns
+        -------
+        np.ndarray or None
+            The cumulative 3x3 rotation matrix if any rotations are present, None otherwise.
+        """
+        from .. import transformation
+
+        # Start with identity matrix
+        cumulative_matrix = None
+
+        # Walk through the transformation stack
+        current_transform = self._snapshot.current_transformation()
+
+        while current_transform is not None:
+            if isinstance(current_transform, transformation.Rotation):
+                if cumulative_matrix is None:
+                    cumulative_matrix = current_transform.matrix.copy()
+                else:
+                    # Compose rotations: new_matrix = current @ previous
+                    cumulative_matrix = np.dot(current_transform.matrix, cumulative_matrix)
+
+            # Move to the previous transformation in the chain
+            current_transform = getattr(current_transform, '_previous_transformation', None)
+
+        return cumulative_matrix
+
     def set_kernel(self, kernel_spec: str | type | kernels.KernelBase | NoneType = None):
         """Set the kernel to be used for the image rendering.
 
@@ -237,6 +266,13 @@ class ImageRendererBase:
         kernel = kernels.create_kernel(kernel_spec)
         if isinstance(kernel, kernels.Kernel2D):
             raise ValueError("To obtain a projected image, pass the 3D kernel which will be projected internally.")
+
+        # If this is a cube kernel and the simulation has been rotated, extract the rotation matrix
+        if isinstance(kernel, (kernels.CubeKernel, kernels.CubeKernelProjection)):
+            rotation_matrix = self._extract_cumulative_rotation_matrix()
+            if rotation_matrix is not None:
+                kernel.set_rotation_matrix(rotation_matrix)
+
         self._kernel = kernel
 
     def _check_quantity_set(self):
