@@ -62,14 +62,8 @@ def _reconcile_dtypes(arrays, allow_coerce):
     if not allow_coerce:
         described = ", ".join(f"{name} is {dtype}" for name, dtype in dtypes.items())
         raise ValueError(
-            "The arrays needed for the direct gravity calculation do not share a single "
-            f"floating point dtype ({described}).\n\n"
-            "The calculation is compiled separately for single and double precision, so it "
-            "cannot mix the two. Either make the dtypes consistent yourself -- for example by "
-            "recreating the offending array with the same dtype as f['pos'] -- or pass "
-            "allow_coerce=True to have pynbody promote everything to float64 for you. Coercion "
-            "is not the default because it makes temporary float64 copies of the positions and "
-            "masses, which for a large snapshot can require a substantial amount of extra memory."
+            f"The gravity calculation cannot mix dtypes ({described}). "
+            "Pass allow_coerce=True to have pynbody convert them for you."
         )
 
     # Anything that is not already single precision is promoted to double, so that coercion
