@@ -17,7 +17,8 @@ from ..array import SimArray
 from ..snapshot.simsnap import SimSnap
 
 
-def direct(f: SimSnap, ipos: np.ndarray, eps: float | SimArray | None = None, num_threads: int | None = None):
+def direct(f: SimSnap, ipos: np.ndarray, eps: float | SimArray | None = None,
+           num_threads: int | None = None, allow_coerce: bool = False):
     """Calculate the gravitational acceleration and potential at the specified positions
 
     The gravitational softening length is determined by (in order of preference):
@@ -45,6 +46,15 @@ def direct(f: SimSnap, ipos: np.ndarray, eps: float | SimArray | None = None, nu
         The number of threads to use. If not specified, the number of threads is determined by the
         configuration parameter ``number_of_threads``.
 
+    allow_coerce : bool, optional
+        The direct summation is compiled separately for single and double precision, and so
+        requires the positions, masses and softenings all to share one dtype. By default a
+        mismatch raises a :class:`ValueError`. Set this to True to have pynbody promote the
+        arrays to ``float64`` instead (or leave them at ``float32`` if none of them is
+        ``float64``). Coercion is off by default because it makes temporary copies of the
+        position and mass arrays, which for a large snapshot may need a substantial amount of
+        extra memory.
+
     Returns
     -------
 
@@ -56,10 +66,10 @@ def direct(f: SimSnap, ipos: np.ndarray, eps: float | SimArray | None = None, nu
 
     """
     from ._gravity import direct
-    return direct(f, ipos, eps, num_threads or 0)
+    return direct(f, ipos, eps, num_threads or 0, allow_coerce=allow_coerce)
 
 
-def all_direct(f: SimSnap, eps: float | SimArray | None = None):
+def all_direct(f: SimSnap, eps: float | SimArray | None = None, allow_coerce: bool = False):
     """Calculate the potential and acceleration for all particles in the snapshot using a direct summation algorithm.
 
     The results are stored inside the snapshot itself, as f['phi'] and f['acc'].
@@ -78,8 +88,12 @@ def all_direct(f: SimSnap, eps: float | SimArray | None = None):
         The gravitational softening length. See :func:`pynbody.gravity.direct` for details of
         how this is used, or what happens when it is not specified.
 
+    allow_coerce :
+        Whether to allow the input arrays to be copied onto a common dtype. See
+        :func:`pynbody.gravity.direct`.
+
     """
-    phi, acc = direct(f, f['pos'].view(np.ndarray), eps)
+    phi, acc = direct(f, f['pos'].view(np.ndarray), eps, allow_coerce=allow_coerce)
     f['phi'] = phi
     f['acc'] = acc
 
@@ -189,7 +203,8 @@ def pm(f: SimSnap, ipos: np.ndarray, ngrid:int = 10, x0=None, x1=None):
 
     return phi, -grad_phi
 
-def midplane_rot_curve(f: SimSnap, rxy_points: np.ndarray, eps: float | SimArray | None = None):
+def midplane_rot_curve(f: SimSnap, rxy_points: np.ndarray, eps: float | SimArray | None = None,
+                       allow_coerce: bool = False):
     """Calculate the rotation curve of a disk galaxy in the x-y midplane (with z=0)
 
     Parameters
@@ -201,6 +216,10 @@ def midplane_rot_curve(f: SimSnap, rxy_points: np.ndarray, eps: float | SimArray
     eps:
         The gravitational softening length. See :func:`pynbody.gravity.direct` for details of
         how this is used, and what happens when it is not specified.
+
+    allow_coerce:
+        Whether to allow the input arrays to be copied onto a common dtype. See
+        :func:`pynbody.gravity.direct`.
 
     Returns
     -------
@@ -216,7 +235,7 @@ def midplane_rot_curve(f: SimSnap, rxy_points: np.ndarray, eps: float | SimArray
     rs = [pos for r in rxy_points for pos in [
         (r, 0, 0), (0, r, 0), (-r, 0, 0), (0, -r, 0)]]
 
-    pot, accel = direct(f, np.array(rs, dtype=f['pos'].dtype), eps=eps)
+    pot, accel = direct(f, np.array(rs, dtype=f['pos'].dtype), eps=eps, allow_coerce=allow_coerce)
 
     u_out = (accel.units * f['pos'].units) ** (1, 2)
 
@@ -244,7 +263,7 @@ def midplane_rot_curve(f: SimSnap, rxy_points: np.ndarray, eps: float | SimArray
     return x
 
 
-def midplane_potential(f, rxy_points, eps=None):
+def midplane_potential(f, rxy_points, eps=None, allow_coerce=False):
     """Calculate the potential of a disk galaxy in the x-y midplane (with z=0)
 
     Parameters
@@ -256,6 +275,10 @@ def midplane_potential(f, rxy_points, eps=None):
     eps :
         The gravitational softening length. See :func:`pynbody.gravity.direct` for details of
         how this is used, or what happens when it is not specified.
+
+    allow_coerce :
+        Whether to allow the input arrays to be copied onto a common dtype. See
+        :func:`pynbody.gravity.direct`.
 
     Returns
     -------
@@ -271,7 +294,8 @@ def midplane_potential(f, rxy_points, eps=None):
     rs = [pos for r in rxy_points for pos in [
         (r, 0, 0), (0, r, 0), (-r, 0, 0), (0, -r, 0)]]
 
-    m_by_r, m_by_r2 = direct(f, np.array(rs, dtype=f['pos'].dtype), eps=eps)
+    m_by_r, m_by_r2 = direct(f, np.array(rs, dtype=f['pos'].dtype), eps=eps,
+                             allow_coerce=allow_coerce)
 
     potential = units.G * m_by_r * f['mass'].units / f['pos'].units
 

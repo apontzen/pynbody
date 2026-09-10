@@ -98,3 +98,151 @@ def test_direct_gravity_large_snapshot_no_segfault():
     pos = np.linspace(4, 10, 20)
     result = pynbody.gravity.midplane_rot_curve(snapshot.dm, pos)
     assert result is not None
+
+
+def _dtype_test_snapshot(npart=50, pos_dtype=np.float64, mass_dtype=np.float64,
+                         eps_dtype=None, eps_value=0.1, eps_units='kpc'):
+    """Build a small snapshot with independently specified dtypes for pos, mass and eps.
+
+    If eps_dtype is None, no eps array is created at all.
+    """
+    f = pynbody.new(dm=npart)
+
+    del f['pos']
+    del f['mass']
+
+    np.random.seed(0)
+    f['pos'] = np.random.normal(size=(npart, 3)).astype(pos_dtype)
+    f['pos'].units = 'kpc'
+    f['mass'] = np.ones(npart, dtype=mass_dtype)
+    f['mass'].units = 'Msol'
+
+    if eps_dtype is not None:
+        f['eps'] = pynbody.array.SimArray(np.full(npart, eps_value, dtype=eps_dtype), eps_units)
+
+    return f
+
+
+@pytest.mark.parametrize("mismatched", ['ipos', 'pos', 'mass', 'eps'])
+def test_mixed_dtypes_raise_by_default(mismatched):
+    """A dtype mismatch must be reported clearly rather than as a Cython buffer error"""
+    dtypes = {'ipos': np.float64, 'pos': np.float64, 'mass': np.float64, 'eps': np.float64}
+    dtypes[mismatched] = np.float32
+
+    f = _dtype_test_snapshot(pos_dtype=dtypes['pos'], mass_dtype=dtypes['mass'],
+                             eps_dtype=dtypes['eps'])
+    ipos = np.array([[0.5, 0.0, 0.0]], dtype=dtypes['ipos'])
+
+    with pytest.raises(ValueError, match="allow_coerce"):
+        pynbody.gravity.direct(f, ipos)
+
+    # the message should say which array is the odd one out
+    with pytest.raises(ValueError, match=f"{mismatched} is float32"):
+        pynbody.gravity.direct(f, ipos)
+
+
+@pytest.mark.parametrize("mismatched", ['ipos', 'pos', 'mass', 'eps'])
+def test_allow_coerce_promotes_to_double(mismatched):
+    """With allow_coerce, a mixed-precision snapshot gives the same answer as a double one"""
+    ipos_double = np.array([[0.5, 0.0, 0.0], [0.0, 1.0, 0.0], [-2.0, 0.0, 0.0]])
+
+    reference = pynbody.gravity.direct(_dtype_test_snapshot(eps_dtype=np.float64), ipos_double)
+
+    dtypes = {'ipos': np.float64, 'pos': np.float64, 'mass': np.float64, 'eps': np.float64}
+    dtypes[mismatched] = np.float32
+
+    f = _dtype_test_snapshot(pos_dtype=dtypes['pos'], mass_dtype=dtypes['mass'],
+                             eps_dtype=dtypes['eps'])
+    pot, accel = pynbody.gravity.direct(f, ipos_double.astype(dtypes['ipos']), allow_coerce=True)
+
+    assert pot.dtype == np.float64
+    assert accel.dtype == np.float64
+
+    # tolerance is set by the single-precision array that has been promoted
+    npt.assert_allclose(pot, reference[0], rtol=1e-6)
+    npt.assert_allclose(accel, reference[1], rtol=1e-6)
+
+
+def test_allow_coerce_leaves_single_precision_alone():
+    """If nothing is double precision, allow_coerce must not silently upcast the whole snapshot"""
+    f = _dtype_test_snapshot(pos_dtype=np.float32, mass_dtype=np.float32, eps_dtype=np.float32)
+    ipos = np.array([[0.5, 0.0, 0.0]], dtype=np.float32)
+
+    pot, accel = pynbody.gravity.direct(f, ipos, allow_coerce=True)
+
+    assert pot.dtype == np.float32
+    assert accel.dtype == np.float32
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_consistent_dtypes_need_no_coercion(dtype):
+    """A snapshot that is internally consistent works without allow_coerce, in either precision"""
+    f = _dtype_test_snapshot(pos_dtype=dtype, mass_dtype=dtype, eps_dtype=dtype)
+    ipos = np.array([[0.5, 0.0, 0.0]], dtype=dtype)
+
+    pot, accel = pynbody.gravity.direct(f, ipos)
+
+    assert pot.dtype == dtype
+    assert accel.dtype == dtype
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_scalar_softening_adopts_snapshot_dtype(dtype):
+    """A scalar or unit softening has no dtype of its own, so must never trigger a mismatch"""
+    f = _dtype_test_snapshot(pos_dtype=dtype, mass_dtype=dtype)
+    ipos = np.array([[0.5, 0.0, 0.0]], dtype=dtype)
+
+    for eps in (0.1, '100 pc', 0.1 * pynbody.units.kpc):
+        f.properties['eps'] = eps
+        pot, _ = pynbody.gravity.direct(f, ipos)
+        assert pot.dtype == dtype
+
+
+def test_softening_array_of_wrong_length_raises():
+    f = _dtype_test_snapshot(npart=50)
+
+    with pytest.raises(ValueError, match="length"):
+        pynbody.gravity.direct(f, np.array([[0.5, 0.0, 0.0]]), eps=np.ones(3))
+
+
+def test_softening_units_respected_for_subsnap():
+    """The softening of a subsnap must be converted into the position units.
+
+    IndexedSimArray is not a subclass of SimArray, so a subsnap softening used to bypass the
+    unit conversion entirely and be interpreted as though it were already in the position units.
+    """
+    npart = 50
+    ipos = np.array([[0.5, 0.0, 0.0]])
+
+    in_kpc = _dtype_test_snapshot(npart=npart, eps_dtype=np.float64, eps_value=0.1, eps_units='kpc')
+    in_pc = _dtype_test_snapshot(npart=npart, eps_dtype=np.float64, eps_value=100.0, eps_units='pc')
+
+    # a sphere large enough to contain everything, so that the two calculations must agree exactly
+    subsnap = in_pc[pynbody.filt.Sphere('1000 kpc')]
+    assert len(subsnap) == npart
+    assert isinstance(subsnap['eps'], pynbody.array.IndexedSimArray)
+
+    npt.assert_allclose(pynbody.gravity.direct(subsnap, ipos)[0],
+                        pynbody.gravity.direct(in_kpc, ipos)[0], rtol=1e-10)
+
+
+def test_midplane_rot_curve_passes_on_allow_coerce():
+    f = _dtype_test_snapshot(eps_dtype=np.float32)
+    rxy = np.linspace(0.5, 2.0, 4)
+
+    with pytest.raises(ValueError, match="allow_coerce"):
+        pynbody.gravity.midplane_rot_curve(f, rxy)
+
+    v = pynbody.gravity.midplane_rot_curve(f, rxy, allow_coerce=True)
+    assert np.all(np.isfinite(v))
+
+
+def test_all_direct_passes_on_allow_coerce():
+    f = _dtype_test_snapshot(eps_dtype=np.float32)
+
+    with pytest.raises(ValueError, match="allow_coerce"):
+        pynbody.gravity.all_direct(f)
+
+    pynbody.gravity.all_direct(f, allow_coerce=True)
+    assert np.all(np.isfinite(f['phi']))
+    assert np.all(np.isfinite(f['acc']))
