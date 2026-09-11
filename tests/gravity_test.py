@@ -123,72 +123,35 @@ def _dtype_test_snapshot(npart=50, pos_dtype=np.float64, mass_dtype=np.float64,
     return f
 
 
-@pytest.mark.parametrize("mismatched", ['ipos', 'pos', 'mass', 'eps'])
-def test_mixed_dtypes_raise_by_default(mismatched):
-    """A dtype mismatch must be reported clearly rather than as a Cython buffer error"""
-    dtypes = {'ipos': np.float64, 'pos': np.float64, 'mass': np.float64, 'eps': np.float64}
-    dtypes[mismatched] = np.float32
-
-    f = _dtype_test_snapshot(pos_dtype=dtypes['pos'], mass_dtype=dtypes['mass'],
-                             eps_dtype=dtypes['eps'])
-    ipos = np.array([[0.5, 0.0, 0.0]], dtype=dtypes['ipos'])
-
-    with pytest.raises(ValueError, match="allow_coerce"):
-        pynbody.gravity.direct(f, ipos)
-
-    # the message should say which array is the odd one out
-    with pytest.raises(ValueError, match=f"{mismatched} is float32"):
-        pynbody.gravity.direct(f, ipos)
+_IPOS = np.array([[0.5, 0.0, 0.0], [0.0, 1.0, 0.0], [-2.0, 0.0, 0.0]])
 
 
-@pytest.mark.parametrize("mismatched", ['ipos', 'pos', 'mass', 'eps'])
-def test_allow_coerce_promotes_to_double(mismatched):
-    """With allow_coerce, a mixed-precision snapshot gives the same answer as a double one"""
-    ipos_double = np.array([[0.5, 0.0, 0.0], [0.0, 1.0, 0.0], [-2.0, 0.0, 0.0]])
+@pytest.mark.parametrize("ipos_dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("eps_dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("mass_dtype", [np.float32, np.float64])
+@pytest.mark.parametrize("pos_dtype", [np.float32, np.float64])
+def test_mixed_dtypes(pos_dtype, mass_dtype, eps_dtype, ipos_dtype):
+    """Positions, masses, softenings and evaluation points may each be single or double precision.
 
-    reference = pynbody.gravity.direct(_dtype_test_snapshot(eps_dtype=np.float64), ipos_double)
+    The kernel is compiled for every combination, so no input needs converting and none of these
+    16 cases should differ from the all-double answer by more than single-precision round-off.
+    """
+    reference = pynbody.gravity.direct(_dtype_test_snapshot(eps_dtype=np.float64), _IPOS)
 
-    dtypes = {'ipos': np.float64, 'pos': np.float64, 'mass': np.float64, 'eps': np.float64}
-    dtypes[mismatched] = np.float32
+    f = _dtype_test_snapshot(pos_dtype=pos_dtype, mass_dtype=mass_dtype, eps_dtype=eps_dtype)
+    pot, accel = pynbody.gravity.direct(f, _IPOS.astype(ipos_dtype))
 
-    f = _dtype_test_snapshot(pos_dtype=dtypes['pos'], mass_dtype=dtypes['mass'],
-                             eps_dtype=dtypes['eps'])
-    pot, accel = pynbody.gravity.direct(f, ipos_double.astype(dtypes['ipos']), allow_coerce=True)
+    # the result takes its precision from the evaluation points
+    assert pot.dtype == ipos_dtype
+    assert accel.dtype == ipos_dtype
 
-    assert pot.dtype == np.float64
-    assert accel.dtype == np.float64
-
-    # tolerance is set by the single-precision array that has been promoted
-    npt.assert_allclose(pot, reference[0], rtol=1e-6)
-    npt.assert_allclose(accel, reference[1], rtol=1e-6)
-
-
-def test_allow_coerce_leaves_single_precision_alone():
-    """If nothing is double precision, allow_coerce must not silently upcast the whole snapshot"""
-    f = _dtype_test_snapshot(pos_dtype=np.float32, mass_dtype=np.float32, eps_dtype=np.float32)
-    ipos = np.array([[0.5, 0.0, 0.0]], dtype=np.float32)
-
-    pot, accel = pynbody.gravity.direct(f, ipos, allow_coerce=True)
-
-    assert pot.dtype == np.float32
-    assert accel.dtype == np.float32
-
-
-@pytest.mark.parametrize("dtype", [np.float32, np.float64])
-def test_consistent_dtypes_need_no_coercion(dtype):
-    """A snapshot that is internally consistent works without allow_coerce, in either precision"""
-    f = _dtype_test_snapshot(pos_dtype=dtype, mass_dtype=dtype, eps_dtype=dtype)
-    ipos = np.array([[0.5, 0.0, 0.0]], dtype=dtype)
-
-    pot, accel = pynbody.gravity.direct(f, ipos)
-
-    assert pot.dtype == dtype
-    assert accel.dtype == dtype
+    npt.assert_allclose(pot, reference[0], rtol=1e-5)
+    npt.assert_allclose(accel, reference[1], rtol=1e-5)
 
 
 @pytest.mark.parametrize("dtype", [np.float32, np.float64])
 def test_scalar_softening_adopts_snapshot_dtype(dtype):
-    """A scalar or unit softening has no dtype of its own, so must never trigger a mismatch"""
+    """A scalar or unit softening has no dtype of its own, and must work in either precision"""
     f = _dtype_test_snapshot(pos_dtype=dtype, mass_dtype=dtype)
     ipos = np.array([[0.5, 0.0, 0.0]], dtype=dtype)
 
@@ -198,11 +161,21 @@ def test_scalar_softening_adopts_snapshot_dtype(dtype):
         assert pot.dtype == dtype
 
 
+def test_integer_softening_is_promoted():
+    """Only single and double precision have specialisations, so anything else is promoted"""
+    f = _dtype_test_snapshot()
+    f['eps'] = pynbody.array.SimArray(np.ones(len(f), dtype=np.int32), 'kpc')
+    assert f['eps'].dtype == np.int32
+
+    pot, _ = pynbody.gravity.direct(f, _IPOS)
+    assert np.all(np.isfinite(pot))
+
+
 def test_softening_array_of_wrong_length_raises():
     f = _dtype_test_snapshot(npart=50)
 
     with pytest.raises(ValueError, match="length"):
-        pynbody.gravity.direct(f, np.array([[0.5, 0.0, 0.0]]), eps=np.ones(3))
+        pynbody.gravity.direct(f, _IPOS, eps=np.ones(3))
 
 
 def test_softening_units_respected_for_subsnap():
@@ -212,7 +185,6 @@ def test_softening_units_respected_for_subsnap():
     unit conversion entirely and be interpreted as though it were already in the position units.
     """
     npart = 50
-    ipos = np.array([[0.5, 0.0, 0.0]])
 
     in_kpc = _dtype_test_snapshot(npart=npart, eps_dtype=np.float64, eps_value=0.1, eps_units='kpc')
     in_pc = _dtype_test_snapshot(npart=npart, eps_dtype=np.float64, eps_value=100.0, eps_units='pc')
@@ -222,27 +194,25 @@ def test_softening_units_respected_for_subsnap():
     assert len(subsnap) == npart
     assert isinstance(subsnap['eps'], pynbody.array.IndexedSimArray)
 
-    npt.assert_allclose(pynbody.gravity.direct(subsnap, ipos)[0],
-                        pynbody.gravity.direct(in_kpc, ipos)[0], rtol=1e-10)
+    npt.assert_allclose(pynbody.gravity.direct(subsnap, _IPOS)[0],
+                        pynbody.gravity.direct(in_kpc, _IPOS)[0], rtol=1e-10)
 
 
-def test_midplane_rot_curve_passes_on_allow_coerce():
-    f = _dtype_test_snapshot(eps_dtype=np.float32)
+def test_midplane_rot_curve_with_mixed_dtypes():
+    """The rotation curve is the route by which issue #1029 hit the dtype mismatch"""
+    f = _dtype_test_snapshot(pos_dtype=np.float64, eps_dtype=np.float32)
     rxy = np.linspace(0.5, 2.0, 4)
 
-    with pytest.raises(ValueError, match="allow_coerce"):
-        pynbody.gravity.midplane_rot_curve(f, rxy)
+    v = pynbody.gravity.midplane_rot_curve(f, rxy)
 
-    v = pynbody.gravity.midplane_rot_curve(f, rxy, allow_coerce=True)
+    assert len(v) == len(rxy)
     assert np.all(np.isfinite(v))
 
 
-def test_all_direct_passes_on_allow_coerce():
-    f = _dtype_test_snapshot(eps_dtype=np.float32)
+def test_all_direct_with_mixed_dtypes():
+    f = _dtype_test_snapshot(pos_dtype=np.float64, eps_dtype=np.float32)
 
-    with pytest.raises(ValueError, match="allow_coerce"):
-        pynbody.gravity.all_direct(f)
+    pynbody.gravity.all_direct(f)
 
-    pynbody.gravity.all_direct(f, allow_coerce=True)
     assert np.all(np.isfinite(f['phi']))
     assert np.all(np.isfinite(f['acc']))

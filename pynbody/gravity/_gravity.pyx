@@ -12,7 +12,24 @@ np.import_array()
 
 DTYPE = np.double
 
-ctypedef fused DTYPE_t:
+# Each argument of _direct gets its own fused type, so that Cython generates a specialisation for
+# every combination of single and double precision inputs. A single shared fused type would
+# instead force the positions, masses and softenings all to have the same dtype as each other,
+# which snapshots are under no obligation to do. See also the same pattern in pynbody/sph/_render.pyx.
+
+ctypedef fused ipos_t:
+    np.float32_t
+    np.float64_t
+
+ctypedef fused pos_t:
+    np.float32_t
+    np.float64_t
+
+ctypedef fused mass_t:
+    np.float32_t
+    np.float64_t
+
+ctypedef fused epssq_t:
     np.float32_t
     np.float64_t
 
@@ -21,59 +38,22 @@ cdef extern from "math.h" nogil:
       float sqrt(float)
 
 
-def _reconcile_dtypes(arrays, allow_coerce):
-    """Bring a set of named arrays onto a single floating point dtype, or explain why we can't.
+def _as_float_array(ar):
+    """Return ar as a bare float32 or float64 array, promoting any other dtype to float64.
 
-    The direct summation kernel is compiled separately for single and double precision, so every
-    array handed to it must share one dtype. This routine works out what that dtype should be.
-
-    Parameters
-    ----------
-
-    arrays : dict
-        Maps a human-readable name onto the array it describes. Insertion order is preserved in
-        any error message, so pass the arrays in the order most helpful to a reader.
-
-    allow_coerce : bool
-        If True, the arrays are promoted to ``float64`` when any one of them is already
-        ``float64``, and otherwise left as ``float32``. If False, any mismatch raises a
-        ``ValueError`` instead of silently making copies.
-
-    Returns
-    -------
-
-    arrays : dict
-        The input arrays, cast where required.
-
-    dtype : numpy.dtype
-        The dtype now shared by all the returned arrays.
-
+    Only single and double precision have kernel specialisations, so an array of any other type
+    (an integer softening, say) is promoted rather than left to fail at dispatch. For the usual
+    case this is a view, not a copy.
     """
+    ar = np.asarray(ar)
 
-    float32 = np.dtype(np.float32)
-    float64 = np.dtype(np.float64)
+    if ar.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+        ar = ar.astype(np.float64)
 
-    dtypes = {name: np.asarray(ar).dtype for name, ar in arrays.items()}
-    distinct = set(dtypes.values())
-
-    if distinct == {float32} or distinct == {float64}:
-        return arrays, distinct.pop()
-
-    if not allow_coerce:
-        described = ", ".join(f"{name} is {dtype}" for name, dtype in dtypes.items())
-        raise ValueError(
-            f"The gravity calculation cannot mix dtypes ({described}). "
-            "Pass allow_coerce=True to have pynbody convert them for you."
-        )
-
-    # Anything that is not already single precision is promoted to double, so that coercion
-    # never quietly throws away precision.
-    dtype = float32 if distinct == {float32} else float64
-
-    return {name: np.asarray(ar, dtype=dtype) for name, ar in arrays.items()}, dtype
+    return ar
 
 
-def direct(f, ipos, eps=None, int num_threads = 0, allow_coerce=False):
+def direct(f, ipos, eps=None, int num_threads = 0):
     global config
 
     if num_threads == 0 :
@@ -104,28 +84,19 @@ def direct(f, ipos, eps=None, int num_threads = 0, allow_coerce=False):
     if isinstance(eps, (array.SimArray, array.IndexedSimArray)):
         eps = eps.in_units(f['pos'].units, **f.conversion_context())
 
-    # A scalar softening carries no dtype of its own, so it is only materialised once the dtype
-    # of everything else has been settled.
-    eps_is_scalar = np.ndim(eps) == 0
+    ipos = _as_float_array(ipos)
 
-    arrays = {'ipos': np.asarray(ipos), 'pos': np.asarray(f['pos']), 'mass': np.asarray(f['mass'])}
+    if np.ndim(eps) == 0:
+        eps = np.repeat(np.asarray(eps, dtype=ipos.dtype), len(f))
+    else:
+        eps = _as_float_array(eps)
 
-    if not eps_is_scalar:
-        arrays['eps'] = np.asarray(eps)
-
-        if len(arrays['eps']) != len(arrays['pos']):
+        if len(eps) != len(f):
             raise ValueError(
-                f"The softening array has length {len(arrays['eps'])}, but the snapshot has "
-                f"{len(arrays['pos'])} particles"
+                f"The softening array has length {len(eps)}, but the snapshot has {len(f)} particles"
             )
 
-    arrays, dtype = _reconcile_dtypes(arrays, allow_coerce)
-
-    if eps_is_scalar:
-        arrays['eps'] = np.repeat(np.asarray(eps, dtype=dtype), len(arrays['pos']))
-
-    m_by_r, m_by_r2 = _direct(arrays['ipos'], arrays['pos'], arrays['mass'],
-                              arrays['eps'] * arrays['eps'])
+    m_by_r, m_by_r2 = _direct(ipos, _as_float_array(f['pos']), _as_float_array(f['mass']), eps * eps)
 
     pot = array.SimArray(-m_by_r,units=f['mass'].units/f['pos'].units * units.G)
     accel = array.SimArray(-m_by_r2,units=f['mass'].units/f['pos'].units**2 * units.G)
@@ -135,13 +106,13 @@ def direct(f, ipos, eps=None, int num_threads = 0, allow_coerce=False):
 
 @cython.cdivision(True)
 @cython.boundscheck(False)
-def _direct(np.ndarray[DTYPE_t, ndim=2] ipos, np.ndarray[DTYPE_t, ndim=2] pos,
-            np.ndarray[DTYPE_t, ndim=1] mass, np.ndarray[DTYPE_t, ndim=1] epssq):
+def _direct(np.ndarray[ipos_t, ndim=2] ipos, np.ndarray[pos_t, ndim=2] pos,
+            np.ndarray[mass_t, ndim=1] mass, np.ndarray[epssq_t, ndim=1] epssq):
     from cython.parallel cimport prange
 
     cdef Py_ssize_t nips = len(ipos)
-    cdef np.ndarray[DTYPE_t, ndim=2] m_by_r2 = np.zeros((nips,3), dtype = ipos.dtype)
-    cdef np.ndarray[DTYPE_t, ndim=1] m_by_r = np.zeros(nips, dtype = ipos.dtype)
+    cdef np.ndarray[ipos_t, ndim=2] m_by_r2 = np.zeros((nips,3), dtype = ipos.dtype)
+    cdef np.ndarray[ipos_t, ndim=1] m_by_r = np.zeros(nips, dtype = ipos.dtype)
     cdef Py_ssize_t n = len(mass)
 
     cdef Py_ssize_t pi, i
