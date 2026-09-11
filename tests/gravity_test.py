@@ -161,14 +161,31 @@ def test_scalar_softening_adopts_snapshot_dtype(dtype):
         assert pot.dtype == dtype
 
 
-def test_integer_softening_is_promoted():
-    """Only single and double precision have specialisations, so anything else is promoted"""
+def test_non_float_softening_raises():
+    """Only single and double precision have specialisations; anything else must fail, not be cast"""
     f = _dtype_test_snapshot()
     f['eps'] = pynbody.array.SimArray(np.ones(len(f), dtype=np.int32), 'kpc')
     assert f['eps'].dtype == np.int32
 
-    pot, _ = pynbody.gravity.direct(f, _IPOS)
-    assert np.all(np.isfinite(pot))
+    with pytest.raises(TypeError):
+        pynbody.gravity.direct(f, _IPOS)
+
+
+def test_softening_without_units_is_taken_as_position_units():
+    """An array softening carrying no units is assumed to be in the position units.
+
+    This matches how a bare number in f.properties['eps'] is treated.
+    """
+    npart = 50
+    with_units = _dtype_test_snapshot(npart=npart, eps_dtype=np.float64, eps_value=0.1,
+                                      eps_units='kpc')
+
+    without_units = _dtype_test_snapshot(npart=npart)
+    without_units['eps'] = np.full(npart, 0.1)
+    assert not pynbody.units.has_units(without_units['eps'])
+
+    npt.assert_allclose(pynbody.gravity.direct(without_units, _IPOS)[0],
+                        pynbody.gravity.direct(with_units, _IPOS)[0], rtol=1e-10)
 
 
 def test_softening_array_of_wrong_length_raises():

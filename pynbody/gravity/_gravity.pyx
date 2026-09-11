@@ -29,28 +29,13 @@ ctypedef fused mass_t:
     np.float32_t
     np.float64_t
 
-ctypedef fused epssq_t:
+ctypedef fused eps_t:
     np.float32_t
     np.float64_t
 
 cdef extern from "math.h" nogil:
       double sqrt(double)
       float sqrt(float)
-
-
-def _as_float_array(ar):
-    """Return ar as a bare float32 or float64 array, promoting any other dtype to float64.
-
-    Only single and double precision have kernel specialisations, so an array of any other type
-    (an integer softening, say) is promoted rather than left to fail at dispatch. For the usual
-    case this is a view, not a copy.
-    """
-    ar = np.asarray(ar)
-
-    if ar.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
-        ar = ar.astype(np.float64)
-
-    return ar
 
 
 def direct(f, ipos, eps=None, int num_threads = 0):
@@ -79,24 +64,24 @@ def direct(f, ipos, eps=None, int num_threads = 0):
     if isinstance(eps, units.UnitBase):
         eps = eps.in_units(f['pos'].units, **f.conversion_context())
 
-    # Note that IndexedSimArray is not a subclass of SimArray, so both have to be named here for
-    # the softening of a subsnap (e.g. a halo, or the result of a filter) to be converted.
-    if isinstance(eps, (array.SimArray, array.IndexedSimArray)):
+    # Duck-typed rather than an isinstance check, so that the softening of a subsnap gets
+    # converted too: those are IndexedSimArrays, which are not a subclass of SimArray.
+    if units.has_units(eps):
         eps = eps.in_units(f['pos'].units, **f.conversion_context())
 
-    ipos = _as_float_array(ipos)
+    ipos = np.asarray(ipos)
 
     if np.ndim(eps) == 0:
         eps = np.repeat(np.asarray(eps, dtype=ipos.dtype), len(f))
     else:
-        eps = _as_float_array(eps)
+        eps = np.asarray(eps)
 
         if len(eps) != len(f):
             raise ValueError(
                 f"The softening array has length {len(eps)}, but the snapshot has {len(f)} particles"
             )
 
-    m_by_r, m_by_r2 = _direct(ipos, _as_float_array(f['pos']), _as_float_array(f['mass']), eps * eps)
+    m_by_r, m_by_r2 = _direct(ipos, np.asarray(f['pos']), np.asarray(f['mass']), np.asarray(eps))
 
     pot = array.SimArray(-m_by_r,units=f['mass'].units/f['pos'].units * units.G)
     accel = array.SimArray(-m_by_r2,units=f['mass'].units/f['pos'].units**2 * units.G)
@@ -107,7 +92,7 @@ def direct(f, ipos, eps=None, int num_threads = 0):
 @cython.cdivision(True)
 @cython.boundscheck(False)
 def _direct(np.ndarray[ipos_t, ndim=2] ipos, np.ndarray[pos_t, ndim=2] pos,
-            np.ndarray[mass_t, ndim=1] mass, np.ndarray[epssq_t, ndim=1] epssq):
+            np.ndarray[mass_t, ndim=1] mass, np.ndarray[eps_t, ndim=1] eps):
     from cython.parallel cimport prange
 
     cdef Py_ssize_t nips = len(ipos)
@@ -116,16 +101,16 @@ def _direct(np.ndarray[ipos_t, ndim=2] ipos, np.ndarray[pos_t, ndim=2] pos,
     cdef Py_ssize_t n = len(mass)
 
     cdef Py_ssize_t pi, i
-    cdef double dx, dy, dz, mass_i, epssq_i, drsoft, drsoft3
+    cdef double dx, dy, dz, mass_i, eps_i, drsoft, drsoft3
 
     for pi in prange(nips, nogil=True, schedule='static'):
         for i in range(n):
             mass_i = mass[i]
-            epssq_i = epssq[i]
+            eps_i = eps[i]
             dx = ipos[pi,0] - pos[i,0]
             dy = ipos[pi,1] - pos[i,1]
             dz = ipos[pi,2] - pos[i,2]
-            drsoft = 1.0/sqrt(dx*dx + dy*dy + dz*dz + epssq_i)
+            drsoft = 1.0/sqrt(dx*dx + dy*dy + dz*dz + eps_i*eps_i)
             drsoft3 = drsoft*drsoft*drsoft
             m_by_r[pi] += mass_i * drsoft
             m_by_r2[pi,0] += mass_i*dx * drsoft3
